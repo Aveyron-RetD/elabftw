@@ -45,17 +45,50 @@ final class Revisions extends AbstractRest
 
     public function create(string $body): int
     {
-        $this->Entity->canOrExplode('write');
+    $this->Entity->canOrExplode('write');
 
-        if (!$this->satisfyDeltaConstraint($body) && !$this->satisfyTimeConstraint() && $this->readCount() > 0) {
-            return 0;
+    $hasRevisions = $this->readCount() > 0;
+    $deltaOk = $this->satisfyDeltaConstraint($body);
+    $timeOk = $this->satisfyTimeConstraint();
+
+    // 🔹 If neither constraint is satisfied → overwrite the latest revision
+    if ($hasRevisions && !$deltaOk && !$timeOk) {
+        $sql = 'SELECT id FROM ' . $this->Entity->entityType->value . '_revisions
+                WHERE item_id = :item_id
+                ORDER BY created_at DESC
+                LIMIT 1';
+        $req = $this->Db->prepare($sql);
+        $req->bindParam(':item_id', $this->Entity->id, PDO::PARAM_INT);
+        $this->Db->execute($req);
+        $lastRevId = (int) $req->fetchColumn();
+
+        if ($lastRevId) {
+            $sql = 'UPDATE ' . $this->Entity->entityType->value . '_revisions
+                    SET body = :body, userid = :userid, created_at = NOW()
+                    WHERE id = :id';
+            $req = $this->Db->prepare($sql);
+            $req->bindParam(':body', $body);
+            $req->bindParam(':userid', $this->Entity->Users->userData['userid'], PDO::PARAM_INT);
+            $req->bindParam(':id', $lastRevId, PDO::PARAM_INT);
+            $this->Db->execute($req);
+            return $lastRevId;
         }
 
-        // destroy the oldest revision if we're reaching the max count
-        if ($this->maxRevisions !== 0 && ($this->readCount() >= $this->maxRevisions)) {
-            $this->destroyOld();
-        }
-        return $this->dbInsert($body);
+        return 0;
+    }
+
+    // 🔹 Otherwise, create a new revision
+    if ($this->maxRevisions !== 0 && $this->readCount() >= $this->maxRevisions) {
+        $this->destroyOld();
+    }
+
+    $newId = $this->dbInsert($body);
+
+    // Update the entity after creating a new revision
+    $this->Entity->entityData['body'] = $body;
+    $this->Entity->entityData['modified_at'] = (new \DateTimeImmutable())->format('Y-m-d H:i:s');
+
+    return $newId;
     }
 
     public function dbInsert(?string $body): int
